@@ -200,6 +200,30 @@ impl GrpcServer {
             .unwrap_or_default()
     }
 
+    /// Best-effort identification of the real remote client.
+    /// Prefers the first IP in `x-forwarded-for` (envoy is in front and
+    /// terminates TLS, so `request.remote_addr()` would be 127.0.0.1).
+    /// Falls back to `request.remote_addr()` for direct connections.
+    fn get_peer<T>(request: &Request<T>) -> String {
+        if let Some(xff) = request
+            .metadata()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+        {
+            // XFF may be a comma-separated chain; take the first (originating client)
+            if let Some(first) = xff.split(',').next() {
+                let trimmed = first.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_owned();
+                }
+            }
+        }
+        request
+            .remote_addr()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+
     fn parse_commitment(commitment: Option<i32>) -> Result<CommitmentLevelProto, Status> {
         let commitment = commitment.unwrap_or(CommitmentLevelProto::Processed as i32);
         CommitmentLevelProto::try_from(commitment)
@@ -406,6 +430,26 @@ impl GrpcServer {
                     .record(duration_to_seconds(ts_filter_set.elapsed()));
                 }
             }
+
+            // Per-tick: how many cache messages behind the live tail is this
+            // client's read head? Non-zero means the worker can't push as
+            // fast as the channel ingests; large + sustained means
+            // multi-second/minute delivery delay even when the channel
+            // itself is at chain tip.
+            //
+            // Labels: id (per-process unique connection id) makes the series
+            // unique even when multiple subscribers share the same
+            // x_subscription_id (token). peer is the remote IP from XFF
+            // (envoy is in front so request.remote_addr is 127.0.0.1).
+            let tail = self.messages.get_current_tail(state.commitment);
+            gauge!(
+                metrics::GRPC_SUBSCRIBE_HEAD_LAG_MESSAGES,
+                "x_subscription_id" => Arc::clone(&state.x_subscription_id),
+                "id" => Arc::clone(&state.id_str),
+                "peer" => Arc::clone(&state.peer),
+            )
+            .set(tail.saturating_sub(head) as f64);
+
             drop(state);
 
             if pushed {
@@ -437,6 +481,7 @@ impl GrpcServer {
         + 'static,
     ) -> TonicResult<Response<ReceiverStream>> {
         let x_subscription_id: Arc<str> = Self::get_x_subscription_id(&request).into();
+        let peer: Arc<str> = Self::get_peer(&request).into();
         counter!(
             metrics::GRPC_REQUESTS_TOTAL,
             "x_subscription_id" => Arc::clone(&x_subscription_id),
@@ -451,6 +496,7 @@ impl GrpcServer {
             self.subscribe_messages_len_max,
             self.subscribe_messages_replay_len_max,
             Arc::clone(&x_subscription_id),
+            peer,
         );
         self.push_client(client.clone());
 
@@ -843,8 +889,9 @@ impl SubscribeClient {
         messages_len_max: usize,
         messages_replay_len_max: usize,
         x_subscription_id: Arc<str>,
+        peer: Arc<str>,
     ) -> Self {
-        let state = SubscribeClientState::new(id, Arc::clone(&x_subscription_id));
+        let state = SubscribeClientState::new(id, Arc::clone(&x_subscription_id), peer);
         Self {
             state: Arc::new(Mutex::new(state)),
             messages: Arc::new(SegQueue::new()),
@@ -882,7 +929,9 @@ impl SubscribeClient {
 pub struct SubscribeClientState {
     pub finished: bool, // check in workers with acquired mutex
     id: u64,
+    pub id_str: Arc<str>,
     x_subscription_id: Arc<str>,
+    pub peer: Arc<str>,
     commitment: CommitmentLevel,
     pub head: IndexLocation,
     pub filter: Option<Filter>,
@@ -898,18 +947,31 @@ impl Drop for SubscribeClientState {
         info!(
             id = self.id,
             x_subscription_id = self.x_subscription_id.as_ref(),
+            peer = self.peer.as_ref(),
             "drop client state"
         );
         gauge!(metrics::GRPC_SUBSCRIBE_TOTAL, "x_subscription_id" => Arc::clone(&self.x_subscription_id))
             .decrement(1);
+        // Zero out the per-subscriber lag gauge so the dashboard doesn't keep
+        // showing a stale value for a disconnected client. The series itself
+        // persists in the registry until process restart, but the value
+        // becomes 0 (= at tip) which is harmless.
+        gauge!(
+            metrics::GRPC_SUBSCRIBE_HEAD_LAG_MESSAGES,
+            "x_subscription_id" => Arc::clone(&self.x_subscription_id),
+            "id" => Arc::clone(&self.id_str),
+            "peer" => Arc::clone(&self.peer),
+        )
+        .set(0.0);
     }
 }
 
 impl SubscribeClientState {
-    fn new(id: u64, x_subscription_id: Arc<str>) -> Self {
+    fn new(id: u64, x_subscription_id: Arc<str>, peer: Arc<str>) -> Self {
         info!(
             id,
             x_subscription_id = x_subscription_id.as_ref(),
+            peer = peer.as_ref(),
             "new client"
         );
         gauge!(metrics::GRPC_SUBSCRIBE_TOTAL, "x_subscription_id" => Arc::clone(&x_subscription_id))
@@ -920,10 +982,14 @@ impl SubscribeClientState {
             "x_subscription_id" => Arc::clone(&x_subscription_id)
         );
 
+        let id_str: Arc<str> = id.to_string().into();
+
         Self {
             finished: false,
             id,
+            id_str,
             x_subscription_id,
+            peer,
             commitment: CommitmentLevel::default(),
             head: IndexLocation::Unknown,
             filter: None,
