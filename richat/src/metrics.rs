@@ -57,6 +57,7 @@ pub const GRPC_SUBSCRIBE_MESSAGES_BYTES_TOTAL: &str = "grpc_subscribe_messages_b
 pub const GRPC_SUBSCRIBE_CPU_SECONDS_TOTAL: &str = "grpc_subscribe_cpu_seconds_total"; // x_subscription_id
 pub const GRPC_SUBSCRIBE_REPLAY_DISK_SECONDS_TOTAL: &str =
     "grpc_subscribe_replay_disk_cpu_seconds_total"; // x_subscription_id
+pub const GRPC_SUBSCRIBE_HEAD_LAG_MESSAGES: &str = "grpc_subscribe_head_lag_messages"; // x_subscription_id, id, peer
 pub const PUBSUB_SLOT: &str = "pubsub_slot"; // commitment
 pub const PUBSUB_CACHED_SIGNATURES_TOTAL: &str = "pubsub_cached_signatures_total";
 pub const PUBSUB_STORED_MESSAGES_COUNT_TOTAL: &str = "pubsub_stored_messages_count_total";
@@ -127,6 +128,7 @@ pub fn setup() -> Result<PrometheusHandle, BuildError> {
     describe_counter!(GRPC_SUBSCRIBE_MESSAGES_BYTES_TOTAL, "Total size of gRPC messages in subscriptions by type");
     describe_gauge!(GRPC_SUBSCRIBE_CPU_SECONDS_TOTAL, "CPU consumption of gRPC filters in subscriptions");
     describe_gauge!(GRPC_SUBSCRIBE_REPLAY_DISK_SECONDS_TOTAL, "CPU consumption of gRPC filters in subscriptions on replay from disk");
+    describe_gauge!(GRPC_SUBSCRIBE_HEAD_LAG_MESSAGES, "Per-subscription distance in cache messages between the worker's read head and the channel tail. Zero means the client is at the live tip; large values mean the worker can't push as fast as the channel ingests, so state.head is falling behind chain tip.");
     describe_gauge!(PUBSUB_SLOT, "Latest slot handled in PubSub by commitment");
     describe_gauge!(PUBSUB_CACHED_SIGNATURES_TOTAL, "Number of cached signatures");
     describe_gauge!(PUBSUB_STORED_MESSAGES_COUNT_TOTAL, "Number of stored filtered messages in cache");
