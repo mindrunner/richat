@@ -513,6 +513,7 @@ impl GrpcServer {
             let messages = self.messages.clone();
             async move {
                 let mut filter_ever_set = false;
+                let mut handshake_abandoned = false;
                 loop {
                     match stream.message().await {
                         Ok(Some(message)) => {
@@ -583,12 +584,15 @@ impl GrpcServer {
                                 continue;
                             }
                         }
-                        Ok(None) => info!(id, "tx stream finished"),
+                        Ok(None) => {
+                            handshake_abandoned = !filter_ever_set;
+                            info!(id, "tx stream finished");
+                        }
                         Err(error) => warn!(id, %error, "error to receive new filter"),
                     };
                     break;
                 }
-                if !filter_ever_set {
+                if handshake_abandoned {
                     counter!(
                         metrics::GRPC_SUBSCRIBE_HANDSHAKE_ABANDONED_TOTAL,
                         "x_subscription_id" => Arc::clone(&x_subscription_id)
