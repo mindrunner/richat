@@ -481,19 +481,17 @@ impl GrpcServer {
 
                             // Warn once when a client has been connected for >3s
                             // without a filter. Matches observed client timeouts.
-                            if !filter_set
-                                && !slow_filter_warned
-                                && ts.duration_since(ts_subscribe_entry) > Duration::from_secs(3)
-                            {
-                                slow_filter_warned = true;
-                                warn!(
-                                    id,
-                                    x_subscription_id = x_subscription_id.as_ref(),
-                                    elapsed_ms = ts
-                                        .duration_since(ts_subscribe_entry)
-                                        .as_millis() as u64,
-                                    "subscribe: filter not set after 3s"
-                                );
+                            if !filter_set && !slow_filter_warned {
+                                let elapsed_ms = ts.duration_since(ts_subscribe_entry).as_millis() as u64;
+                                if elapsed_ms > 3_000 {
+                                    slow_filter_warned = true;
+                                    warn!(
+                                        id,
+                                        x_subscription_id = x_subscription_id.as_ref(),
+                                        elapsed_ms,
+                                        "subscribe: filter not set after 3s"
+                                    );
+                                }
                             }
 
                             if ts.duration_since(ts_latest) > ping_interval {
@@ -513,7 +511,6 @@ impl GrpcServer {
             let limits = Arc::clone(&self.filter_limits);
             let client = client.clone();
             let messages = self.messages.clone();
-            let x_subscription_id_for_task = Arc::clone(&x_subscription_id);
             async move {
                 let mut filter_ever_set = false;
                 loop {
@@ -551,7 +548,7 @@ impl GrpcServer {
                                     {
                                         let metric_cpu_usage = gauge!(
                                             metrics::GRPC_SUBSCRIBE_REPLAY_DISK_SECONDS_TOTAL,
-                                            "x_subscription_id" => Arc::clone(&x_subscription_id_for_task)
+                                            "x_subscription_id" => Arc::clone(&x_subscription_id)
                                         );
                                         messages
                                             .replay_from_storage(client.clone(), metric_cpu_usage)
@@ -577,11 +574,9 @@ impl GrpcServer {
                                     filter_ever_set = true;
                                     histogram!(
                                         metrics::GRPC_SUBSCRIBE_FILTER_PARSE_SECONDS,
-                                        "x_subscription_id" => Arc::clone(&x_subscription_id_for_task)
+                                        "x_subscription_id" => Arc::clone(&x_subscription_id)
                                     )
-                                    .record(duration_to_seconds(
-                                        ts_subscribe_entry.elapsed(),
-                                    ));
+                                    .record(duration_to_seconds(ts_subscribe_entry.elapsed()));
                                 }
                                 drop(state);
                                 info!(id, "set new filter");
@@ -596,7 +591,7 @@ impl GrpcServer {
                 if !filter_ever_set {
                     counter!(
                         metrics::GRPC_SUBSCRIBE_HANDSHAKE_ABANDONED_TOTAL,
-                        "x_subscription_id" => Arc::clone(&x_subscription_id_for_task)
+                        "x_subscription_id" => Arc::clone(&x_subscription_id)
                     )
                     .increment(1);
                 }
