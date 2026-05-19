@@ -398,13 +398,7 @@ impl GrpcServer {
             // clients actually perceive. Taken-once: only the first push
             // after the filter was applied records the histogram.
             if pushed {
-                if let Some(ts_filter_set) = state.ts_filter_set.take() {
-                    histogram!(
-                        metrics::GRPC_SUBSCRIBE_TIME_TO_FIRST_MESSAGE_SECONDS,
-                        "x_subscription_id" => Arc::clone(&state.x_subscription_id)
-                    )
-                    .record(duration_to_seconds(ts_filter_set.elapsed()));
-                }
+                state.observe_time_to_first_message();
             }
             drop(state);
 
@@ -949,6 +943,17 @@ impl SubscribeClientState {
     #[inline]
     fn create_pong(id: i32) -> Vec<u8> {
         Self::serialize_ping_pong(UpdateOneof::Pong(SubscribeUpdatePong { id }))
+    }
+
+    /// Observe the first data message pushed after a filter is applied.
+    pub fn observe_time_to_first_message(&mut self) {
+        if let Some(ts_filter_set) = self.ts_filter_set.take() {
+            histogram!(
+                metrics::GRPC_SUBSCRIBE_TIME_TO_FIRST_MESSAGE_SECONDS,
+                "x_subscription_id" => Arc::clone(&self.x_subscription_id)
+            )
+            .record(duration_to_seconds(ts_filter_set.elapsed()));
+        }
     }
 }
 
