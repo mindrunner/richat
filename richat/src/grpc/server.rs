@@ -325,6 +325,30 @@ impl GrpcServer {
             if state.finished {
                 continue;
             }
+
+            // Detect zombie clients: buffer full but nothing drained for
+            // ZOMBIE_TIMEOUT. Happens when a downstream connection dies without
+            // the HTTP/2 stream being closed (e.g. behind Envoy). Terminate it
+            // with an error and drop it from the worker rotation (not requeued)
+            // so it stops consuming a worker slot and CPU for every tick.
+            if client.is_zombie() {
+                warn!(
+                    id = state.id,
+                    x_subscription_id = state.x_subscription_id.as_ref(),
+                    messages_len = client.messages_len.load(Ordering::Relaxed),
+                    "dropping zombie client (buffer full, no drain for 30s)"
+                );
+                counter!(
+                    metrics::GRPC_SUBSCRIBE_ZOMBIE_DROPPED_TOTAL,
+                    "x_subscription_id" => Arc::clone(&state.x_subscription_id)
+                )
+                .increment(1);
+                state.finished = true;
+                drop(state);
+                client.push_error(Status::deadline_exceeded("zombie: buffer full, no drain"));
+                continue;
+            }
+
             let ts = Instant::now();
 
             // filter messages
@@ -819,6 +843,23 @@ impl geyser_gen::geyser_server::Geyser for GrpcServer {
 
 type SubscribeMessage = Result<(GrpcSubscribeMessage, Vec<u8>), Status>;
 
+/// Wall-clock milliseconds since the unix epoch. Used for the lock-free
+/// zombie-detection timestamp; coarse precision is fine for a 30s timeout.
+#[inline]
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// A subscriber is considered a zombie once its outbound buffer is full and
+/// nothing has been drained for this long. Happens when a downstream
+/// connection dies without the HTTP/2 stream being closed (e.g. behind Envoy):
+/// the client stays in the worker queue with a full buffer that never drains,
+/// wasting a worker slot and diluting fair scheduling for every other client.
+const ZOMBIE_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone)]
 pub struct SubscribeClient {
     state: Arc<Mutex<SubscribeClientState>>,
@@ -828,6 +869,11 @@ pub struct SubscribeClient {
     pub messages_replay_len_max: usize,
     waker: Arc<AtomicWaker>,
     x_subscription_id: Arc<str>,
+    /// Unix-millis of the last successful `poll_next` drain. Lock-free
+    /// (the streaming hot path must not contend with the worker's state
+    /// mutex), read by workers together with `messages_len` to detect
+    /// zombies. Initialized to "now" so a brand-new client is never a zombie.
+    last_pop_at: Arc<AtomicU64>,
 }
 
 impl SubscribeClient {
@@ -846,7 +892,17 @@ impl SubscribeClient {
             messages_replay_len_max,
             waker: Arc::new(AtomicWaker::new()),
             x_subscription_id,
+            last_pop_at: Arc::new(AtomicU64::new(now_unix_millis())),
         }
+    }
+
+    /// True when the buffer is full and nothing has drained for `ZOMBIE_TIMEOUT`.
+    fn is_zombie(&self) -> bool {
+        if self.messages_len.load(Ordering::Relaxed) <= self.messages_len_max {
+            return false;
+        }
+        let idle_ms = now_unix_millis().saturating_sub(self.last_pop_at.load(Ordering::Relaxed));
+        idle_ms > ZOMBIE_TIMEOUT.as_millis() as u64
     }
 
     #[inline]
@@ -995,6 +1051,9 @@ impl Stream for ReceiverStream {
                     self.client
                         .messages_len
                         .fetch_sub(data.len(), Ordering::Relaxed);
+                    self.client
+                        .last_pop_at
+                        .store(now_unix_millis(), Ordering::Relaxed);
                     counter!(
                         metrics::GRPC_SUBSCRIBE_MESSAGES_COUNT_TOTAL,
                         "x_subscription_id" => Arc::clone(&self.client.x_subscription_id),

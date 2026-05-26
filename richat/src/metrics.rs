@@ -62,6 +62,7 @@ pub const GRPC_SUBSCRIBE_TIME_TO_FIRST_MESSAGE_SECONDS: &str =
     "grpc_subscribe_time_to_first_message_seconds"; // x_subscription_id
 pub const GRPC_SUBSCRIBE_HANDSHAKE_ABANDONED_TOTAL: &str =
     "grpc_subscribe_handshake_abandoned_total"; // x_subscription_id, reason
+pub const GRPC_SUBSCRIBE_ZOMBIE_DROPPED_TOTAL: &str = "grpc_subscribe_zombie_dropped_total"; // x_subscription_id
 pub const PUBSUB_SLOT: &str = "pubsub_slot"; // commitment
 pub const PUBSUB_CACHED_SIGNATURES_TOTAL: &str = "pubsub_cached_signatures_total";
 pub const PUBSUB_STORED_MESSAGES_COUNT_TOTAL: &str = "pubsub_stored_messages_count_total";
@@ -135,6 +136,7 @@ pub fn setup() -> Result<PrometheusHandle, BuildError> {
     describe_histogram!(GRPC_SUBSCRIBE_FILTER_PARSE_SECONDS, "Seconds between subscribe handshake start and the moment the client's SubscribeRequest is parsed into a filter");
     describe_histogram!(GRPC_SUBSCRIBE_TIME_TO_FIRST_MESSAGE_SECONDS, "Seconds between filter being applied and the first data message pushed to the client");
     describe_counter!(GRPC_SUBSCRIBE_HANDSHAKE_ABANDONED_TOTAL, "Subscribe handshakes where the client stream ended before a filter was ever set");
+    describe_counter!(GRPC_SUBSCRIBE_ZOMBIE_DROPPED_TOTAL, "Subscribers force-dropped because their buffer was full and undrained beyond the zombie timeout (dead downstream connection not closed)");
     describe_gauge!(PUBSUB_SLOT, "Latest slot handled in PubSub by commitment");
     describe_gauge!(PUBSUB_CACHED_SIGNATURES_TOTAL, "Number of cached signatures");
     describe_gauge!(PUBSUB_STORED_MESSAGES_COUNT_TOTAL, "Number of stored filtered messages in cache");
